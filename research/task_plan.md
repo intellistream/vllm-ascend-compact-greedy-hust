@@ -9,7 +9,8 @@ sufficiency and bounded fallback. No serving qualification is currently granted.
 3. Implement E0 exact rational reference protocol and adversarial tests: complete; 2,904 exhaustive
    distribution/sharding/threshold combinations plus boundary and invalid-input tests pass.
 4. Validate source reconstruction and CI, publish research kickoff: local reconstruction and
-   20 selector tests pass; remote CI is the final publication gate.
+   20 selector tests pass; GitHub push and PR source jobs passed. Delivery is tracked in
+   [PR #1](https://github.com/intellistream/vllm-ascend-compact-greedy-hust/pull/1).
 5. Next: define the real-logits interchange format and frozen per-request output contract; audit
    actual baseline sampler and choose a single runtime integration slice before any NPU run.
 

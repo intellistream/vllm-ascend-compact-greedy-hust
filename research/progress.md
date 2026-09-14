@@ -22,3 +22,9 @@ local/CI browser checks and the GitHub-reported successful Pages deployment.
 Local evidence root: /data/statecentric-builds/compact-sampling-incubation-20260914-r001
 (transfer-verified.json, candidate/receipt.json, e0-model/manifest.json,
 website/output/playwright/incubation-delisting/result.json). CI also exports its own model manifest.
+
+Research kickoff PR #1: both push and PR GitHub source jobs passed, including fresh public
+baseline restoration, reconstruction, selector tests, rational tests and model artifact upload.
+Repository homepage now links to research/; owner/visibility read back as intellistream/public.
+An independent web fetch can retrieve the public plugin HTML; dynamic catalog verification from
+this host still remains limited by the browser connection timeout described above.
