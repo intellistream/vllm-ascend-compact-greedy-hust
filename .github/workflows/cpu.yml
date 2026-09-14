@@ -24,3 +24,12 @@ jobs:
         env:
           STATEAXIS_COMPACT_DRAFT_SOURCE: /data/statecentric-builds/candidate/vllm-ascend-hust
         run: python -I -B tests/test_sampling_mode.py
+      - name: Validate exact rational reference and bounded fallback
+        run: |
+          python -I -B research/test_reference.py
+          python -I -B research/run_reference.py --output /data/statecentric-builds/reference
+      - name: Preserve model-only reference evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-reference-model-only
+          path: /data/statecentric-builds/reference/manifest.json

@@ -10,9 +10,9 @@ sampling path. No StateAxis governance module or vLLM core patch is required.
 **Status:** source reconstruction and CPU checks pass. Actual worker activation,
 NPU numerical/collective behavior, API transitions and end-to-end performance
 remain unqualified. This is not a hot-loadable plugin, PyPI package or an
-Extension Manager activation bundle. The website lists it as a source-mod preview.
+Extension Manager activation bundle. The repository is incubating in intellistream and is withdrawn from the vLLM-HUST public plugin catalog.
 
-[中文说明](docs/README.zh.md) · [Compatibility](docs/compatibility.md) ·
+[Research plan / 研究计划](research/README.md) · [中文说明](docs/README.zh.md) · [Compatibility](docs/compatibility.md) ·
 [Evidence](docs/evidence.md) · [License](LICENSE)
 
 ## Exact baseline
@@ -36,7 +36,7 @@ Create an isolated Python environment if needed. On the development host all
 artifacts must stay under `/data/statecentric-builds`. Each output must be new.
 
 ```bash
-git clone https://github.com/vLLM-HUST/vllm-ascend-compact-greedy-hust.git
+git clone https://github.com/intellistream/vllm-ascend-compact-greedy-hust.git
 cd vllm-ascend-compact-greedy-hust
 
 python restore_baselines.py --output /data/statecentric-builds/compact-greedy-base
@@ -74,11 +74,23 @@ remove the mod key. There is no per-rank or in-flight toggle.
 
 ## Version and authorship
 
-Mod `0.1.0.dev2` packages the byte-identical StateAxis integration `0.1.0.dev9`
-runtime patch. This publication changes packaging and baseline availability,
-not the runtime algorithm. Future runtime changes receive a new mod version
+Mod `0.1.0.dev3` packages the byte-identical StateAxis integration `0.1.0.dev9`
+runtime patch. This publication records the organization transfer and adds an
+independent research reference model. Future runtime changes receive a new mod version
 and independent qualification. Historical scores are not inherited.
 
 Shuhao Zhang is the sole project author and maintainer; this project has no
 advisor role. Upstream licenses and original contribution attribution remain
 in force. See [MAINTAINERS.md](MAINTAINERS.md) and [NOTICE](NOTICE).
+
+## Research incubation
+
+The next milestone targets OSDI ’27, subject to correctness, novelty and real-serving evidence gates.
+The research direction is exact distributed sampling for mixed output contracts with checked
+candidate sufficiency and bounded fallback. Existing mixed-request kernels and distributed
+sampling methods are baselines, not claimed inventions. See [the research charter](research/README.md).
+
+Packaging version 0.1.0.dev3 records the organization transfer and research kickoff.
+The runtime patch, materializer and exact baseline bundles remain byte-identical to dev2.
+The new CPU reference model is separate research code; it does not qualify the serving mod.
+The original dev2 manifest is preserved in [releases/0.1.0.dev2](releases/0.1.0.dev2/mod.json).

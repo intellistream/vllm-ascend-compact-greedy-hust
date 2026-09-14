@@ -1,7 +1,7 @@
 {
   "schema": "stateaxis-source-mod-v1",
   "name": "ascend-compact-greedy",
-  "version": "0.1.0.dev3",
+  "version": "0.1.0.dev2",
   "runtime_integration_version": "0.1.0.dev9",
   "runtime_version_record_sha256": "f9ad48821d360d9cc628dd3872fb52bec91d4b49ea6971e0830df2053776735b",
   "status": "experimental-source-only",
@@ -63,18 +63,11 @@
   "authors": [
     {
       "name": "Shuhao Zhang",
-      "name_zh": "\u5f20\u4e66\u8c6a",
+      "name_zh": "张书豪",
       "github": "ShuhaoZhangTony"
     }
   ],
   "advisors": [],
-  "repository": "https://github.com/intellistream/vllm-ascend-compact-greedy-hust",
-  "baseline_manifest_sha256": "0923e16d183f88299b3e40322d266a28049473c756cec8764ed2ec241bbdcbf0",
-  "incubation": {
-    "organization": "intellistream",
-    "date": "2026-09-14",
-    "public_plugin_listed": false,
-    "research_plan": "research/README.md",
-    "runtime_patch_unchanged": true
-  }
+  "repository": "https://github.com/vLLM-HUST/vllm-ascend-compact-greedy-hust",
+  "baseline_manifest_sha256": "0923e16d183f88299b3e40322d266a28049473c756cec8764ed2ec241bbdcbf0"
 }

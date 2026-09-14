@@ -17,3 +17,9 @@
 
 当前通过的是源码与 CPU 验证；真实 worker 激活、NPU 数值/通信、API 回退切换和
 本 mod 的端到端收益仍待验收。旧 dev8 开关的 +4.42% 不属于本 mod 的性能结果。
+
+## 孵化状态（2026-09-14）
+
+仓库已迁回 [intellistream](https://github.com/intellistream/vllm-ascend-compact-greedy-hust)，
+从 vLLM-HUST 公开 plugin 列表下架。包版本更新为 0.1.0.dev3；运行时补丁仍是原 dev9 字节，
+不继承旧配置吞吐收益。目标与退出条件见[研究计划](../research/README.md)。
