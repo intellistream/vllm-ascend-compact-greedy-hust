@@ -1,0 +1,73 @@
+{
+  "schema": "stateaxis-source-mod-v1",
+  "name": "ascend-compact-greedy",
+  "version": "0.1.0.dev2",
+  "runtime_integration_version": "0.1.0.dev9",
+  "runtime_version_record_sha256": "f9ad48821d360d9cc628dd3872fb52bec91d4b49ea6971e0830df2053776735b",
+  "status": "experimental-source-only",
+  "upstream": {
+    "vllm_hust": "c8d7449de35538995b22f114f64502151b9fd29c",
+    "vllm_ascend_hust": "5d3849215ca78fc15df4785ea692671441d108cc"
+  },
+  "patch_sha256": "f7ab3cf699f4c932820e30aade896e5061f2503e6f1bf7885fc968a785867364",
+  "materializer_sha256": "7b7b69acc85dac4568e40c0b549deb3995ac7d7c5f760603b9c175d075572613",
+  "files": [
+    {
+      "path": "vllm_ascend/ascend_config.py",
+      "before_sha256": "cf9d823da665f79d8f669fe216e28a51697d6ffa98b01b55ba6c75e77a9a00c2",
+      "after_sha256": "5d1d846aa94a45911b7281ebbe76b0dadcb49f0d74fcc50671fe0a2e153afed6"
+    },
+    {
+      "path": "vllm_ascend/worker/model_runner_v1.py",
+      "before_sha256": "69875a8a5588775e0f9b0a9c26b899cebbb39623d5f845b20f5d0e1cacd8cbf1",
+      "after_sha256": "6fab268aa5b62ba319e86c69af5001065cca7f62f3e5d9a67617effd978e8212"
+    },
+    {
+      "path": "vllm_ascend/ops/vocab_parallel_embedding.py",
+      "before_sha256": "8a46b80019e62f164a49eed0d6103695e5806eb36f607bcc5007f76f55c0b7e0",
+      "after_sha256": "953aa1a8231b1599150047be8fbb5649a28c80c0611ca5748100b6ea6dc48ffb"
+    },
+    {
+      "path": "vllm_ascend/sample/sampler.py",
+      "before_sha256": "a4b4b63ea6d8cc2065f49d5d5e3c7080722d70effa569a283bfb48829cf560b6",
+      "after_sha256": "8bebecc4f4df684a524dc57bea0bf848a73e9c20bcaf179fa3513a810f1d576a"
+    },
+    {
+      "path": "vllm_ascend/sample/sampling_mode.py",
+      "before_sha256": null,
+      "after_sha256": "f961524a726df610efd1b50cffd08dac49345e834a35432d3aa8d7ae7c9a68c3"
+    }
+  ],
+  "default_enabled": false,
+  "enable_additional_config": {
+    "stateaxis_compact_greedy": true
+  },
+  "disable_additional_config": {
+    "stateaxis_compact_greedy": false
+  },
+  "incompatible_additional_config": {
+    "enable_reduce_sample": true
+  },
+  "vllm_runtime_changes": [],
+  "stateaxis_governance_required": false,
+  "runtime_behavior_changed_from_dev9": false,
+  "validation_remaining": [
+    "Installed source identity and actual static support activation; tensor math including ties/NaN/infinities and original sampler output types",
+    "Real compact-to-full-to-compact API requests, prompt/sample logprobs, processors and lifecycle boundaries",
+    "Contemporaneous repeated E2E net benefit versus original HUST and last retained base1; no inherited dev8 qualification"
+  ],
+  "serving_qualified": false,
+  "performance_qualified": false,
+  "retained": false,
+  "rollback": "Use the original pinned backend artifact and remove the mod setting; restart all workers together.",
+  "authors": [
+    {
+      "name": "Shuhao Zhang",
+      "name_zh": "张书豪",
+      "github": "ShuhaoZhangTony"
+    }
+  ],
+  "advisors": [],
+  "repository": "https://github.com/vLLM-HUST/vllm-ascend-compact-greedy-hust",
+  "baseline_manifest_sha256": "0923e16d183f88299b3e40322d266a28049473c756cec8764ed2ec241bbdcbf0"
+}

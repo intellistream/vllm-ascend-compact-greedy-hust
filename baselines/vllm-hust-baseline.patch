@@ -1,0 +1,187 @@
+From 76ae9e64a3b62b232f80e8949c5e56db240227b0 Mon Sep 17 00:00:00 2001
+From: "Shuhao Zhang (Tony)" <5267690+ShuhaoZhangTony@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 09:29:32 +0800
+Subject: [PATCH 1/2] fix: detect vllm-hust distribution version
+
+Assisted-by: OpenAI Codex
+---
+ .../test_platform_package_version.py          | 30 +++++++++++++++++++
+ vllm/platforms/__init__.py                    | 18 +++++++----
+ 2 files changed, 42 insertions(+), 6 deletions(-)
+ create mode 100644 tests/platforms/test_platform_package_version.py
+
+diff --git a/tests/platforms/test_platform_package_version.py b/tests/platforms/test_platform_package_version.py
+new file mode 100644
+index 000000000..1c092556c
+--- /dev/null
++++ b/tests/platforms/test_platform_package_version.py
+@@ -0,0 +1,30 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++from importlib.metadata import PackageNotFoundError
++
++import pytest
++
++from vllm.platforms import vllm_version_matches_substr
++
++
++def test_vllm_hust_distribution_name_is_supported(monkeypatch: pytest.MonkeyPatch):
++    def fake_version(package_name: str) -> str:
++        if package_name == "vllm-hust":
++            return "0.23.1+empty"
++        raise PackageNotFoundError(package_name)
++
++    monkeypatch.setattr("importlib.metadata.version", fake_version)
++
++    assert vllm_version_matches_substr("empty")
++    assert not vllm_version_matches_substr("cpu")
++
++
++def test_missing_vllm_distributions_raise(monkeypatch: pytest.MonkeyPatch):
++    def missing_version(package_name: str) -> str:
++        raise PackageNotFoundError(package_name)
++
++    monkeypatch.setattr("importlib.metadata.version", missing_version)
++
++    with pytest.raises(PackageNotFoundError, match="vllm, vllm-hust"):
++        vllm_version_matches_substr("cpu")
+diff --git a/vllm/platforms/__init__.py b/vllm/platforms/__init__.py
+index 647793ab8..807a97522 100644
+--- a/vllm/platforms/__init__.py
++++ b/vllm/platforms/__init__.py
+@@ -30,14 +30,20 @@ def vllm_version_matches_substr(substr: str) -> bool:
+     """
+     from importlib.metadata import PackageNotFoundError, version
+ 
+-    try:
+-        vllm_version = version("vllm")
+-    except PackageNotFoundError as e:
++    package_names = ("vllm", "vllm-hust")
++    for package_name in package_names:
++        try:
++            vllm_version = version(package_name)
++            break
++        except PackageNotFoundError:
++            continue
++    else:
+         logger.warning(
+-            "The vLLM package was not found, so its version could not be "
+-            "inspected. This may cause platform detection to fail."
++            "Neither the vLLM nor vLLM-HUST package was found, so the "
++            "version could not be inspected. This may cause platform "
++            "detection to fail."
+         )
+-        raise e
++        raise PackageNotFoundError(", ".join(package_names))
+     return substr in vllm_version
+ 
+ 
+-- 
+2.34.1
+
+
+From c8d7449de35538995b22f114f64502151b9fd29c Mon Sep 17 00:00:00 2001
+From: "Shuhao Zhang (Tony)" <5267690+ShuhaoZhangTony@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 13:24:25 +0800
+Subject: [PATCH 2/2] fix: recognize active out-of-tree Triton drivers
+
+---
+ tests/test_triton_utils.py     | 19 +++++++++++++++++
+ vllm/triton_utils/importing.py | 38 +++++++++++++++++++++++++++++-----
+ 2 files changed, 52 insertions(+), 5 deletions(-)
+
+diff --git a/tests/test_triton_utils.py b/tests/test_triton_utils.py
+index 7fe0a5d9c..8830ce1a9 100644
+--- a/tests/test_triton_utils.py
++++ b/tests/test_triton_utils.py
+@@ -3,11 +3,30 @@
+ 
+ import sys
+ import types
++from types import SimpleNamespace
+ from unittest import mock
+ 
++from vllm.triton_utils import importing
+ from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceholder
+ 
+ 
++def test_active_out_of_tree_triton_driver_is_supported(monkeypatch):
++    active_driver = SimpleNamespace(is_active=lambda: True)
++    fake_triton = SimpleNamespace(
++        runtime=SimpleNamespace(driver=SimpleNamespace(active=active_driver))
++    )
++    monkeypatch.setattr(importing.current_platform, "is_out_of_tree", lambda: True)
++    monkeypatch.setitem(sys.modules, "triton", fake_triton)
++
++    assert importing._has_active_out_of_tree_triton_driver()
++
++
++def test_in_tree_platform_does_not_use_out_of_tree_driver(monkeypatch):
++    monkeypatch.setattr(importing.current_platform, "is_out_of_tree", lambda: False)
++
++    assert not importing._has_active_out_of_tree_triton_driver()
++
++
+ def test_triton_placeholder_is_module():
+     triton = TritonPlaceholder()
+     assert isinstance(triton, types.ModuleType)
+diff --git a/vllm/triton_utils/importing.py b/vllm/triton_utils/importing.py
+index e17450f78..98146eb06 100644
+--- a/vllm/triton_utils/importing.py
++++ b/vllm/triton_utils/importing.py
+@@ -12,6 +12,28 @@ from vllm.utils.math_utils import cdiv
+ 
+ logger = init_logger(__name__)
+ 
++
++def _has_active_out_of_tree_triton_driver() -> bool:
++    """Detect Triton distributions whose backend registry is not upstream-shaped.
++
++    Some out-of-tree platforms, notably Triton-Ascend, expose their active
++    driver through ``triton.runtime.driver`` but do not export the
++    ``triton.backends.backends`` mapping used by upstream Triton.  Treating
++    that layout as "no Triton" replaces every ``@triton.jit`` kernel with a
++    plain Python function and makes later ``kernel[grid]`` launches fail.
++    """
++    if not current_platform.is_out_of_tree():
++        return False
++
++    try:
++        import triton
++
++        active_driver = triton.runtime.driver.active
++        return bool(active_driver and active_driver.is_active())
++    except Exception:
++        return False
++
++
+ HAS_TRITON = (
+     find_spec("triton") is not None
+     or find_spec("pytorch-triton-xpu") is not None  # Not compatible
+@@ -70,11 +92,17 @@ if HAS_TRITON:
+     except ImportError:
+         # This can occur if Triton is partially installed or triton.backends
+         # is missing.
+-        logger.warning(
+-            "Triton is installed, but `triton.backends` could not be imported. "
+-            "Disabling Triton."
+-        )
+-        HAS_TRITON = False
++        if _has_active_out_of_tree_triton_driver():
++            logger.info(
++                "Using the active out-of-tree Triton driver because "
++                "`triton.backends.backends` is unavailable."
++            )
++        else:
++            logger.warning(
++                "Triton is installed, but `triton.backends` could not be imported. "
++                "Disabling Triton."
++            )
++            HAS_TRITON = False
+     except Exception as e:
+         # Catch any other unexpected errors during the check.
+         logger.warning(
+-- 
+2.34.1
+

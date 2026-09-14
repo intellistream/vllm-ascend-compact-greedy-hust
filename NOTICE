@@ -1,0 +1,7 @@
+Ascend Compact Greedy
+Copyright 2026 Shuhao Zhang
+
+Derived from the StateAxis 0.1.0.dev9 experimental Ascend implementation.
+The compact sampling mechanism builds on vLLM and vLLM Ascend.
+Upstream copyright and Apache-2.0 notices remain applicable to derived code.
+The baseline bundles preserve their original commit authors and metadata.

@@ -1,0 +1,23 @@
+{
+  "schema": "compact-greedy-baselines-v1",
+  "repositories": [
+    {
+      "name": "vllm-hust",
+      "repository": "https://github.com/vLLM-HUST/vllm-hust.git",
+      "public_anchor": "92237c2abd46d91c750e14f20fb53f8050795e21",
+      "commit": "c8d7449de35538995b22f114f64502151b9fd29c",
+      "bundle": "baselines/vllm-hust.bundle",
+      "bundle_sha256": "d28ce6d2bb73d591cc982a2c4df5f9bb160f27b8045910a8c4ed2271b3db2815",
+      "review_patch": "baselines/vllm-hust-baseline.patch"
+    },
+    {
+      "name": "vllm-ascend-hust",
+      "repository": "https://github.com/vLLM-HUST/vllm-ascend-hust.git",
+      "public_anchor": "913841ce6cbeed2e23a29ea40a8d91b158a9ebe0",
+      "commit": "5d3849215ca78fc15df4785ea692671441d108cc",
+      "bundle": "baselines/vllm-ascend-hust.bundle",
+      "bundle_sha256": "aae612b4c8300849123c1b039a39d1a5e1286486ee54226dac6683f305fae0d5",
+      "review_patch": "baselines/vllm-ascend-hust-baseline.patch"
+    }
+  ]
+}

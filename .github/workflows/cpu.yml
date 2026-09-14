@@ -1,0 +1,26 @@
+name: Source and CPU validation
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare isolated artifact directory
+        run: sudo install -d -o "$USER" /data/statecentric-builds
+      - name: Restore public baseline ancestors and bundled commits
+        run: python restore_baselines.py --output /data/statecentric-builds/base
+      - name: Reconstruct the mod
+        run: |
+          python mod.py materialize \
+            --vllm-source /data/statecentric-builds/base/vllm-hust \
+            --ascend-source /data/statecentric-builds/base/vllm-ascend-hust \
+            --output /data/statecentric-builds/candidate
+      - name: Check selector and request ownership
+        env:
+          STATEAXIS_COMPACT_DRAFT_SOURCE: /data/statecentric-builds/candidate/vllm-ascend-hust
+        run: python -I -B tests/test_sampling_mode.py

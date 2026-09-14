@@ -1,0 +1,419 @@
+--- a/vllm_ascend/ascend_config.py
++++ b/vllm_ascend/ascend_config.py
+@@ -354,6 +354,14 @@
+ 
+         # Enable optimized reduce sampling scheme
+         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
++
++        # Experimental batch-selective plain-greedy path. The legacy switch
++        # must remain off so every unsupported batch uses original full logits.
++        self.stateaxis_compact_greedy = additional_config.get("stateaxis_compact_greedy", False)
++        if type(self.stateaxis_compact_greedy) is not bool:
++            raise ValueError("stateaxis_compact_greedy must be a bool")
++        if self.stateaxis_compact_greedy and self.enable_reduce_sample:
++            raise ValueError("stateaxis_compact_greedy cannot be combined with enable_reduce_sample")
+ 
+         self.mix_placement = additional_config.get("mix_placement", False)
+         self._check_mix_placement()
+--- a/vllm_ascend/worker/model_runner_v1.py
++++ b/vllm_ascend/worker/model_runner_v1.py
+@@ -41,7 +41,7 @@
+ from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
+ from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
+ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+-from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
++from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group, get_world_group
+ from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
+ from vllm.logger import logger
+ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+@@ -128,6 +128,13 @@
+ from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
+ from vllm_ascend.quantization.utils import enable_fa_quant
+ from vllm_ascend.sample.sampler import AscendSampler
++from vllm_ascend.sample.sampling_mode import (
++    FULL_PLAN,
++    BatchSamplingPlan,
++    SamplingMode,
++    logits_plan_scope,
++    plain_decode_request_ids,
++)
+ from vllm_ascend.spec_decode import get_spec_decode_method
+ from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+ from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
+@@ -257,6 +264,7 @@
+     ec_connector_output: "ECConnectorOutput | None"
+     cudagraph_stats: CUDAGraphStat | None
+     batch_desc: BatchDescriptor
++    sampling_plan: BatchSamplingPlan
+ 
+ 
+ class NPUModelRunner(GPUModelRunner):
+@@ -572,6 +580,10 @@
+         )
+         # for cleancode , actually the three attrs is defined in gpu_model_runner
+         self.execute_model_state: ExecuteModelState | None = None
++        self._compact_greedy_supported = False
++        self._compact_projector = None
++        self._compact_lm_head = None
++        self.compact_greedy_batch_counts = {"compact_greedy": 0, "full": 0}
+         # None in the first PP rank. The rest are set after load_model.
+         self.intermediate_tensors: IntermediateTensors | None = None
+         self.reorder_batch_threshold: int | None = None
+@@ -780,6 +792,110 @@
+                     req_state.prev_num_draft_len = 0
+ 
+         return super()._update_states(scheduler_output)
++
++    def _initialize_compact_greedy(self) -> None:
++        """One CPU agreement after loading; no additional per-step collective.
++
++        The first candidate supports only the audited language-only Qwen3.5
++        delegate, TP2/PP2/DP1 and equal unpadded shards. Every other setup uses
++        full logits. The same RPC stream supplies parameters to every worker.
++        """
++        if not self.ascend_config.stateaxis_compact_greedy:
++            return
++        # These classes are already loaded here. Keep model-specific capability
++        # inspection out of the hot path and out of the generic selector.
++        from vllm.model_executor.models.qwen3_5 import (
++            Qwen3_5ForCausalLM,
++            Qwen3_5ForCausalLMBase,
++            Qwen3_5ForConditionalGeneration,
++        )
++        from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
++        from vllm.v1.sample.logits_processor.builtin import (
++            LogitBiasLogitsProcessor,
++            MinPLogitsProcessor,
++            MinTokensLogitsProcessor,
++        )
++        from vllm_ascend.ops.vocab_parallel_embedding import AscendLogitsProcessor, AscendParallelLMHead
++
++        pp, tp, world = get_pp_group(), get_tp_group(), get_world_group()
++        packet = {"supported": False, "last_stage": pp.is_last_rank, "reason": None, "head": None}
++        try:
++            parallel = self.parallel_config
++            common = (
++                parallel.tensor_parallel_size == 2 and parallel.pipeline_parallel_size == 2
++                and parallel.data_parallel_size == 1 and self.pcp_size == 1
++                and get_dcp_group().world_size == 1 and world.world_size == 4
++                and parallel.distributed_executor_backend == "mp"
++                and self.use_async_scheduling and not self.broadcast_pp_output
++                and not lmhead_tp_enable() and self.speculative_config is None
++                and self.lora_config is None and not self.is_pooling_model
++                and self.vllm_config.kv_transfer_config is None
++                and getattr(self.vllm_config, "ec_transfer_config", None) is None
++                and self.vllm_config.weight_transfer_config is None
++                and not self.model_config.enable_sleep_mode
++                and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
++                and self.model_config.multimodal_config is not None
++                and self.model_config.multimodal_config.language_model_only
++                and not self.model_config.logits_processors
++            )
++            processors = list(self.input_batch.logitsprocs.all)
++            common = common and len(processors) == 3 and {type(p) for p in processors} == {
++                MinTokensLogitsProcessor, LogitBiasLogitsProcessor, MinPLogitsProcessor,
++            }
++            model = self.get_model()
++            common = common and type(model) is Qwen3_5ForConditionalGeneration
++            language_model = getattr(model, "language_model", None)
++            common = common and type(language_model) is Qwen3_5ForCausalLM
++            common = common and model.compute_logits.__func__ is Qwen3VLForConditionalGeneration.compute_logits
++            common = common and language_model.compute_logits.__func__ is Qwen3_5ForCausalLMBase.compute_logits
++            if not common:
++                raise ValueError("outside the first candidate's static model/topology/processor matrix")
++            if pp.is_last_rank:
++                projector, head = language_model.logits_processor, language_model.lm_head
++                if not (
++                    type(projector) is AscendLogitsProcessor and type(head) is AscendParallelLMHead
++                    and head.quant_config is None and head.weight.dtype == torch.bfloat16
++                    and head.comm_group is tp and head.tp_size == tp.world_size
++                    and head.num_embeddings == head.org_vocab_size == head.num_embeddings_padded
++                    and head.num_org_embeddings_per_partition == head.num_embeddings_per_partition
++                    and head.shard_indices.num_org_vocab_padding == 0
++                    and head.shard_indices.org_vocab_start_index == tp.rank_in_group * head.num_embeddings_per_partition
++                    and projector.org_vocab_size == head.org_vocab_size
++                    and projector.scale == 1.0 and projector.soft_cap is None and not projector.logits_as_input
++                ):
++                    raise ValueError("only ordinary equal unpadded BF16 vocabulary shards are admitted")
++                self._compact_projector, self._compact_lm_head = projector, head
++                packet["head"] = (head.org_vocab_size, head.num_embeddings_per_partition)
++            packet["supported"] = True
++        except Exception as error:
++            # Unsupported local capability cannot choose a different per-step
++            # communication pattern: every world rank sees the same agreement.
++            packet["reason"] = str(error)
++        packets = [None] * world.world_size
++        dist.all_gather_object(packets, packet, group=world.cpu_group)
++        heads = [p["head"] for p in packets if p["last_stage"]]
++        self._compact_greedy_supported = (
++            all(p["supported"] for p in packets) and len(heads) == 2 and heads[0] == heads[1]
++        )
++        logger.info("StateAxis compact-greedy static support=%s; rank capabilities=%s",
++                    self._compact_greedy_supported, packets)
++
++    def _compact_sampling_plan(self, scheduler_output: "SchedulerOutput") -> BatchSamplingPlan:
++        if not self._compact_greedy_supported:
++            return FULL_PLAN
++        request_ids = plain_decode_request_ids(scheduler_output, self.requests)
++        if request_ids is None:
++            return FULL_PLAN
++        row_ids = tuple(self.input_batch.req_ids)
++        if tuple(sorted(row_ids)) != request_ids:
++            raise RuntimeError("compact projection rows differ from scheduled requests")
++        head = self._compact_lm_head
++        return BatchSamplingPlan(
++            SamplingMode.COMPACT_GREEDY, row_ids,
++            tuple(self.requests[key] for key in row_ids),
++            id(self._compact_projector), head.shard_indices.org_vocab_start_index,
++            head.num_org_embeddings_per_partition,
++        )
+ 
+     def _pad_query_start_loc_for_fia(
+         self,
+@@ -2397,10 +2513,16 @@
+                     return output
+ 
+                 sample_hidden_states = hidden_states[logits_indices]
+-                logits = self.model.compute_logits(sample_hidden_states)
++                sampling_plan = self._compact_sampling_plan(scheduler_output)
++                if sampling_plan.mode is SamplingMode.COMPACT_GREEDY:
++                    with logits_plan_scope(sampling_plan):
++                        logits = self.model.compute_logits(sample_hidden_states)
++                else:
++                    logits = self.model.compute_logits(sample_hidden_states)
+             else:
+                 # Rare case.
+                 assert not self.is_pooling_model
++                sampling_plan = FULL_PLAN
+ 
+                 if not get_pp_group().is_last_rank:
+                     sample_hidden_states = hidden_states[logits_indices]
+@@ -2433,6 +2555,7 @@
+                 ec_connector_output,
+                 cudagraph_stats,
+                 batch_desc,
++                sampling_plan,
+             )
+             self.kv_connector_output = kv_connector_output
+ 
+@@ -2483,9 +2606,19 @@
+             ec_connector_output,
+             cudagraph_stats,
+             batch_desc,
++            sampling_plan,
+         ) = self.execute_model_state
+         # Clear ephemeral state.
+         self.execute_model_state = None
++
++        if sampling_plan.mode is SamplingMode.COMPACT_GREEDY:
++            # Unexpected grammar/state changes are protocol errors, not a late
++            # per-rank fallback after projection has already chosen collectives.
++            if (grammar_output is not None or spec_decode_metadata is not None
++                    or tuple(self.input_batch.req_ids) != sampling_plan.request_ids
++                    or any(self.requests.get(key) is not state for key, state in
++                           zip(sampling_plan.request_ids, sampling_plan.request_states))):
++                raise RuntimeError("compact sampling execution/request contract changed before sampling")
+ 
+         # Apply structured output bitmasks if present.
+         if grammar_output is not None:
+@@ -2497,7 +2630,9 @@
+             logits = logits.to(self.device).to(logits_dtype)
+ 
+         with record_function_or_nullcontext("sample_token"):
+-            sampler_output = self._sample(logits, spec_decode_metadata)
++            sampler_output = self._sample(logits, spec_decode_metadata, sampling_plan)
++            if self.ascend_config.stateaxis_compact_greedy:
++                self.compact_greedy_batch_counts[sampling_plan.mode.value] += 1
+ 
+         if self.need_accepted_tokens:
+             if self.sampling_done_event is None:
+@@ -2655,10 +2790,12 @@
+         return async_output
+ 
+     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
+-    def _sample(self, logits, spec_decode_metadata):
++    def _sample(self, logits, spec_decode_metadata, sampling_plan=FULL_PLAN):
+         # Sample the next token and get logprobs if needed.
+         self.input_batch.update_async_output_token_ids()
+         sampling_metadata = self.input_batch.sampling_metadata
++        if sampling_plan.mode is SamplingMode.COMPACT_GREEDY:
++            return self.sampler.sample_compact_greedy(logits, sampling_plan)
+         if spec_decode_metadata is None:
+             if lmhead_tp_enable() and logits is not None:
+                 logits = logits[: self.input_batch.num_reqs]
+@@ -3832,6 +3969,8 @@
+             and mm_config is not None
+             and mm_config.is_multimodal_pruning_enabled()
+         ) # type: bool
++
++        self._initialize_compact_greedy()
+ 
+         # wrap the model with full graph wrapper if needed.
+         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+--- a/vllm_ascend/ops/vocab_parallel_embedding.py
++++ b/vllm_ascend/ops/vocab_parallel_embedding.py
+@@ -39,6 +39,7 @@
+ 
+ from vllm_ascend.ascend_config import get_ascend_config
+ from vllm_ascend.distributed.parallel_state import get_embed_tp_group, get_lmhead_tp_group
++from vllm_ascend.sample.sampling_mode import SamplingMode, current_logits_plan
+ from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable
+ 
+ 
+@@ -326,6 +327,17 @@
+         lm_head: AscendParallelLMHead,
+         embedding_bias: torch.Tensor | None,
+     ) -> torch.Tensor | None:
++        plan = current_logits_plan()
++        if plan.mode is SamplingMode.COMPACT_GREEDY:
++            # The initialization agreement admits only equal, unpadded shards.
++            # Preserve LogitsProcessor.forward's existing scale/soft-cap order.
++            if (plan.projector_identity != id(self)
++                    or lm_head.num_embeddings != lm_head.num_embeddings_padded
++                    or lm_head.org_vocab_size != lm_head.num_embeddings
++                    or lm_head.shard_indices.org_vocab_start_index != plan.local_vocab_start
++                    or lm_head.num_org_embeddings_per_partition != plan.local_vocab_size):
++                raise RuntimeError("compact logits projector/layout changed after initialization")
++            return lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+         logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+         # Gather logits for tensor parallel
+         if not get_ascend_config().enable_reduce_sample:
+--- a/vllm_ascend/sample/sampler.py
++++ b/vllm_ascend/sample/sampler.py
+@@ -3,6 +3,7 @@
+ from vllm.distributed.parallel_state import get_tp_group
+ from vllm.logger import init_logger
+ from vllm.triton_utils import HAS_TRITON
++from vllm.v1.outputs import SamplerOutput
+ from vllm.v1.sample.metadata import SamplingMetadata
+ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+ from vllm.v1.sample.sampler import Sampler
+@@ -10,6 +11,7 @@
+ import vllm_ascend.envs as envs_ascend
+ from vllm_ascend.ascend_config import get_ascend_config
+ from vllm_ascend.sample.penalties import apply_all_penalties
++from vllm_ascend.sample.sampling_mode import BatchSamplingPlan, SamplingMode
+ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
+ 
+ DEFAULT_LOGPROBS_MODE = "raw_logprobs"
+@@ -90,6 +92,29 @@
+ 
+     def prepare_sampling(self, top_k):
+         self.topk_topp_sampler.prepare_sampling(top_k)
++
++    def sample_compact_greedy(self, logits: torch.Tensor, plan: BatchSamplingPlan) -> SamplerOutput:
++        """Explicit compact mode; ordinary forward remains the full-logits path.
++
++        Eligibility was fixed before projection. All admitted processors are
++        no-ops for these requests, no logprobs are requested, and greedy consumes
++        no RNG. Separate float values / int64 IDs retain exact vocabulary IDs.
++        """
++        if (plan.mode is not SamplingMode.COMPACT_GREEDY
++                or logits.ndim != 2 or logits.shape[1] != plan.local_vocab_size
++                or logits.shape[0] != len(plan.request_ids)):
++            raise RuntimeError("compact logits shape/mode differs from its execution plan")
++        logits = logits.to(torch.float32)  # Same conversion as Sampler.forward.
++        values, indices = logits.max(dim=-1)
++        indices = indices + plan.local_vocab_start
++        tp = get_tp_group()
++        values = tp.all_gather(values.unsqueeze(-1), dim=-1)
++        indices = tp.all_gather(indices.unsqueeze(-1), dim=-1)
++        # Initialization requires contiguous shards in TP rank order. First
++        # local max + first maximum rank preserves the full argmax tie order.
++        winner = values.argmax(dim=-1, keepdim=True)
++        sampled = indices.gather(-1, winner).to(torch.int32)
++        return SamplerOutput(sampled_token_ids=sampled, logprobs_tensors=None)
+ 
+     def do_async_exponential(self, b_s, head_dim, generators):
+         # Calculating exponential randoms in a different stream
+--- /dev/null
++++ b/vllm_ascend/sample/sampling_mode.py
+@@ -0,0 +1,88 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Immutable per-execution sampling decision; no torch or runtime imports.
++
++The selector reads only scheduler-broadcast facts and cached request parameters.
++It never uses output history, processor state, device tensors or rank-local
++timing to choose a collective. Unsupported batches retain full-vocabulary
++logits. The context is confined to one compute_logits call, never sampling.
++"""
++
++from contextlib import contextmanager
++from contextvars import ContextVar
++from dataclasses import dataclass, field
++from enum import Enum
++
++
++class SamplingMode(Enum):
++    FULL = "full"
++    COMPACT_GREEDY = "compact_greedy"
++
++
++@dataclass(frozen=True)
++class BatchSamplingPlan:
++    mode: SamplingMode
++    request_ids: tuple[str, ...] = ()
++    # Strong references prevent object-address reuse before sampling retires.
++    request_states: tuple[object, ...] = field(default=(), repr=False, compare=False)
++    projector_identity: int | None = None
++    local_vocab_start: int = 0
++    local_vocab_size: int = 0
++
++
++FULL_PLAN = BatchSamplingPlan(SamplingMode.FULL)
++_LOGITS_PLAN: ContextVar[BatchSamplingPlan] = ContextVar("stateaxis_logits_plan", default=FULL_PLAN)
++
++
++def current_logits_plan() -> BatchSamplingPlan:
++    return _LOGITS_PLAN.get()
++
++
++@contextmanager
++def logits_plan_scope(plan: BatchSamplingPlan):
++    token = _LOGITS_PLAN.set(plan)
++    try:
++        yield
++    finally:
++        _LOGITS_PLAN.reset(token)
++
++
++def plain_decode_request_ids(scheduler_output, requests) -> tuple[str, ...] | None:
++    """Return eligible IDs, or None for whole-batch full-logits fallback.
++
++NewRequestData and CachedRequestData carry computed positions from the same
++RPC broadcast. Do not substitute asynchronously corrected worker counters.
++The conservative request-lifetime exclusions avoid depending on evolving
++min-tokens, thinking-budget, grammar or history-dependent processor state.
++"""
++    if (scheduler_output.total_num_scheduled_tokens <= 0
++            or scheduler_output.has_structured_output_requests
++            or scheduler_output.pending_structured_output_tokens
++            or scheduler_output.scheduled_spec_decode_tokens
++            or scheduler_output.scheduled_encoder_inputs):
++        return None
++    scheduled = scheduler_output.num_scheduled_tokens
++    if not scheduled or any(count != 1 for count in scheduled.values()):
++        return None
++    cached = scheduler_output.scheduled_cached_reqs
++    computed = dict(zip(cached.req_ids, cached.num_computed_tokens))
++    computed.update((row.req_id, row.num_computed_tokens) for row in scheduler_output.scheduled_new_reqs)
++    for req_id in scheduled:
++        request = requests.get(req_id)
++        if request is None:
++            return None
++        params = request.sampling_params
++        if (params is None or params.sampling_type.name != "GREEDY"
++                or params.logprobs is not None or params.prompt_logprobs is not None
++                or params.logprob_token_ids is not None
++                or params.structured_outputs is not None
++                or params.thinking_token_budget is not None
++                or params.min_tokens != 0 or params.logit_bias
++                or params.allowed_token_ids or params.bad_words_token_ids
++                or params.presence_penalty != 0 or params.frequency_penalty != 0
++                or params.repetition_penalty != 1
++                or request.lora_request is not None or request.mm_features
++                or request.prompt_embeds is not None
++                or computed.get(req_id, -1) < request.num_prompt_tokens):
++            return None
++    # This is only a generation guard, not the model's row ordering.
++    return tuple(sorted(scheduled))
