@@ -12,8 +12,22 @@ NPU numerical/collective behavior, API transitions and end-to-end performance
 remain unqualified. This is not a hot-loadable plugin, PyPI package or an
 Extension Manager activation bundle. The repository is incubating in intellistream and is withdrawn from the vLLM-HUST public plugin catalog.
 
+## Current application program: PowerServe
+
+The portfolio topic carried by this repository has been reframed as
+**PowerServe: application-oriented LLM inference and operations for power
+enterprises**. Wu Jian ([@TreeNewWind](https://github.com/TreeNewWind)) owns the
+application program. The existing compact-greedy source mod remains a bounded
+candidate component and is admitted only if evidence from an authorized,
+privacy-safe workload shows distributed sampling is a material bottleneck.
+
+This program assignment does not change source authorship or repository
+maintainership. It also does not imply endorsement, data authorization, or a
+formal partnership by China Huaneng Group. See the
+[PowerServe application charter](docs/powerserve-application-charter.md).
+
 [Research plan / 研究计划](research/README.md) · [中文说明](docs/README.zh.md) · [Compatibility](docs/compatibility.md) ·
-[Evidence](docs/evidence.md) · [License](LICENSE)
+[Evidence](docs/evidence.md) · [PowerServe charter](docs/powerserve-application-charter.md) · [License](LICENSE)
 
 ## Exact baseline
 
